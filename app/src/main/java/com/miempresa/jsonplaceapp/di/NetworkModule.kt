@@ -1,7 +1,8 @@
-package com.miempresa.jsonplaceapp.data.remote
+package com.miempresa.jsonplaceapp.di
 
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.miempresa.jsonplaceapp.data.remote.ApiService
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
