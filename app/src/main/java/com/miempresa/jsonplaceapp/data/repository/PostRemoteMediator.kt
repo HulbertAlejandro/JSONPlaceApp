@@ -8,24 +8,33 @@ import com.miempresa.jsonplaceapp.data.local.dao.PostDao
 import com.miempresa.jsonplaceapp.data.local.entity.PostEntity
 import com.miempresa.jsonplaceapp.data.mapper.toEntity
 import com.miempresa.jsonplaceapp.data.remote.ApiService
+import com.miempresa.jsonplaceapp.util.NetworkMonitor
+import kotlinx.coroutines.flow.first // Importante para leer el estado de red
 import retrofit2.HttpException
 import java.io.IOException
-
-private const val PAGE_SIZE = 20
 
 @OptIn(ExperimentalPagingApi::class)
 class PostRemoteMediator(
     private val apiService: ApiService,
     private val postDao: PostDao,
-    private val userId: Int?        // null = sin filtro
+    private val networkMonitor: NetworkMonitor,
+    private val userId: Int?
 ) : RemoteMediator<Int, PostEntity>() {
 
     override suspend fun initialize(): InitializeAction {
-        // Si ya hay datos locales, no forzar refresco al arrancar
         val count = postDao.getPostCount()
-        return if (count > 0) {
+
+        // Obtenemos el último valor emitido por el monitor de red
+        val isOnline = networkMonitor.isOnline.first()
+
+        return if (isOnline) {
+            // Si hay internet, refrescamos para asegurar consistencia
+            InitializeAction.LAUNCH_INITIAL_REFRESH
+        } else if (count > 0) {
+            // Si no hay internet pero hay datos, mostramos lo que tenemos
             InitializeAction.SKIP_INITIAL_REFRESH
         } else {
+            // Si no hay nada de nada, intentamos cargar (aunque falle, es el flujo inicial)
             InitializeAction.LAUNCH_INITIAL_REFRESH
         }
     }
@@ -34,35 +43,27 @@ class PostRemoteMediator(
         loadType: LoadType,
         state: PagingState<Int, PostEntity>
     ): MediatorResult {
-
         val page = when (loadType) {
             LoadType.REFRESH -> 0
-
-            LoadType.PREPEND ->
-                // No necesitamos cargar hacia arriba
-                return MediatorResult.Success(endOfPaginationReached = true)
-
+            LoadType.PREPEND -> return MediatorResult.Success(endOfPaginationReached = true)
             LoadType.APPEND -> {
-                // Calculamos el offset según cuántos items hay en DB
-                val lastItem = state.lastItemOrNull()
-                    ?: return MediatorResult.Success(endOfPaginationReached = true)
-                // Offset = posición del último item + 1
+                // Offset basado en la cantidad de items actuales en la base de datos
                 state.pages.sumOf { it.data.size }
             }
         }
 
         return try {
             val response = apiService.getPosts(
-                start  = page,
-                limit  = state.config.pageSize,
+                start = page,
+                limit = state.config.pageSize,
                 userId = userId
             )
 
             val endOfPagination = response.size < state.config.pageSize
 
-            if (loadType == LoadType.REFRESH) {
-                // En refresh limpiamos solo si no hay filtro para no borrar cachés parciales
-                if (userId == null) postDao.clearAll()
+            if (loadType == LoadType.REFRESH && userId == null) {
+                // Solo limpiamos la base de datos si es una carga general (sin filtros)
+                postDao.clearAll()
             }
 
             postDao.insertAll(response.map { it.toEntity() })
@@ -70,9 +71,13 @@ class PostRemoteMediator(
             MediatorResult.Success(endOfPaginationReached = endOfPagination)
 
         } catch (e: IOException) {
-            // Sin conexión → Paging usará los datos locales de Room
+            // Error de red o falta de conexión
             MediatorResult.Error(e)
         } catch (e: HttpException) {
+            // Error del servidor (404, 500, etc.)
+            MediatorResult.Error(e)
+        } catch (e: Exception) {
+            // Cualquier otro error inesperado
             MediatorResult.Error(e)
         }
     }

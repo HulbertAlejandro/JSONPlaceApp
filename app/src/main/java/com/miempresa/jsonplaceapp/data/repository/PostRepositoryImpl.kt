@@ -14,6 +14,7 @@ import com.miempresa.jsonplaceapp.domain.model.Post
 import com.miempresa.jsonplaceapp.domain.model.User
 import com.miempresa.jsonplaceapp.domain.repository.PostRepository
 import com.miempresa.jsonplaceapp.domain.util.Resource
+import com.miempresa.jsonplaceapp.util.NetworkMonitor // Importación necesaria
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import retrofit2.HttpException
@@ -28,7 +29,8 @@ class PostRepositoryImpl @Inject constructor(
     private val postDao: PostDao,
     private val userDao: UserDao,
     private val commentDao: CommentDao,
-    private val database: AppDatabase
+    private val database: AppDatabase,
+    private val networkMonitor: NetworkMonitor // 1. Agregado para inyección de Hilt
 ) : PostRepository {
 
     override fun getPagedPosts(
@@ -36,7 +38,6 @@ class PostRepositoryImpl @Inject constructor(
         titleQuery: String?
     ): Flow<PagingData<Post>> {
 
-        // Selecciona la fuente local según los filtros activos
         val pagingSourceFactory: () -> PagingSource<Int, *> = {
             when {
                 userId != null && !titleQuery.isNullOrBlank() -> { postDao.getPostsByUserIdAndTitlePaged(userId, titleQuery) }
@@ -48,17 +49,18 @@ class PostRepositoryImpl @Inject constructor(
 
         return Pager(
             config = PagingConfig(
-                pageSize         = PAGE_SIZE,
+                pageSize = PAGE_SIZE,
                 prefetchDistance = 5,
                 enablePlaceholders = false
             ),
             remoteMediator = PostRemoteMediator(
                 apiService = apiService,
-                postDao    = postDao,
-                userId     = userId
+                postDao = postDao,
+                networkMonitor = networkMonitor, // 2. Ahora sí pasamos el parámetro faltante
+                userId = userId
             ),
             pagingSourceFactory = @Suppress("UNCHECKED_CAST")
-            (pagingSourceFactory as () -> PagingSource<Int, PostEntity> as () -> PagingSource<Int, PostEntity>)
+            (pagingSourceFactory as () -> PagingSource<Int, PostEntity>)
         ).flow.map { pagingData ->
             pagingData.map { entity -> entity.toDomain() }
         }
@@ -66,12 +68,10 @@ class PostRepositoryImpl @Inject constructor(
 
     override suspend fun getPostById(postId: Int): Resource<Post> {
         return try {
-            // Primero intentamos la API para tener datos frescos
             val dto = apiService.getPostById(postId)
             postDao.insert(dto.toEntity())
             Resource.Success(dto.toDomain())
         } catch (e: IOException) {
-            // Sin internet → buscamos en Room
             val local = postDao.getPostById(postId)
             if (local != null) Resource.Success(local.toDomain())
             else Resource.Error("Sin conexión y no hay datos locales para este post.")
